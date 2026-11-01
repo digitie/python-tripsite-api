@@ -328,13 +328,38 @@ class BaseSiteClient(ABC):
   실제 로그인 플로우(리다이렉트가 많음)에서 타임아웃이 나면 `page.wait_for_selector` 기반
   대기로 전환을 검토한다.
 
-### 8.2 여기어때 (goodchoice.kr, 구 yeogiotae.com)
-- 공식 "여기어때" 서비스 도메인은 `goodchoice.kr`로 이전되었다는 정보가 있으나, 리다이렉트
-  구조(`yeogiotae.com` → `goodchoice.kr`)는 구현 착수 시 실측 필요.
-- 앱스토어 메타데이터상 "예약내역" 기능이 뚜렷이 노출된 것은 사장님(파트너)용 앱이며, 일반
-  소비자용 예약내역은 일반 웹/앱의 마이페이지 하위에 있을 것으로 추정. **이 라이브러리는
-  일반 소비자 계정 기준으로만 구현**한다.
-- 로그인 수단도 ID/PW 외 소셜 로그인이 있을 수 있어 8.1과 동일하게 ID/PW만 지원.
+### 8.2 여기어때 (goodchoice.kr → www.yeogi.com) — Task #4에서 실측 완료 (로그인만; 예약내역 진입점은 미발견)
+- `goodchoice.kr`은 `www.yeogi.com`으로 리다이렉트된다(실제 서비스 도메인). 인증은 별도
+  서브도메인 `platform.yeogi.com`에서 처리한다.
+- 로그인: 홈(`www.yeogi.com`)에서 "로그인" 클릭 →
+  `https://platform.yeogi.com/login?redirectUri=https://www.yeogi.com/`. 카카오/네이버/
+  Apple/페이스북/구글 소셜 로그인 버튼과 "이메일로 시작하기" 버튼이 있고, 이 라이브러리는
+  **"이메일로 시작하기"(ID/PW) 경로만** 지원한다(8.1과 동일하게 소셜 로그인은 범위 밖).
+  클릭 시 `.../login/email`로 이동, 폼은 `#userEmail`(type=email), `#userPassword`
+  (password), 제출 버튼 텍스트 **"로그인"**(단, 네비게이션 바의 "로그인/회원가입"과 겹치므로
+  `exact=True`로 구분해야 함 - `get_by_text(..., exact=False)`를 쓰면 엉뚱한 버튼을 클릭할
+  위험이 있다).
+- 로그인 여부 판별: 로그인 후 `redirectUri`로 지정한 `www.yeogi.com` 홈으로 돌아오므로, 홈
+  본문에 **"로그인/회원가입"** 문구가 있으면 비로그인 상태로 판단한다(실제 로그인 성공 후
+  이 문구가 사라지는지는 미검증 - Task #4 완료 조건).
+- 예약내역: **진입점을 찾지 못했다.** 비로그인 상태의 홈 메뉴에는 "비회원 예약조회"
+  (`platform.yeogi.com/guest/reservation/check`)만 있고, 회원용 예약내역 링크는 로그인 후에만
+  nav에 나타나는 것으로 보인다(로그아웃 상태에서는 어떤 정적 href/클릭 가능 텍스트로도
+  발견되지 않음). `platform.yeogi.com/reservation`, `/member/reservation`, `/mypage` 등 추정
+  경로는 모두 `ERR_HTTP_RESPONSE_CODE_FAILURE`로 실패했다(인증 없이 접근 불가능한 것으로
+  추정). **실제 로그인 후 nav를 직접 관찰해야만** 알 수 있다.
+- **구현 상태**: `login()`/`is_logged_in()`은 위 실측대로 구현했다. `fetch_reservations()`는
+  로그인 상태 확인까지만 하고, 예약내역 진입점을 못 찾았으므로 즉시 `ScrapeStructureError`를
+  던진다(`sites/yeogiotae.py` 모듈 docstring 참고) - 실제 YEOGIOTAE_ID/YEOGIOTAE_PW로 로그인
+  후 nav를 관찰해야 완성할 수 있다. 야놀자보다 더 이른 단계에서 막혀 있다.
+- **테스트 인프라 주의사항**: 여기어때(Nuxt/Vue)는 번들 스크립트를 parser-blocking
+  `document.write()`로 주입한다. 네트워크 없이 `page.set_content(fixture_html)`로 재생하면
+  그 스크립트 로드가 실패하는 시점에서 HTML 파싱 자체가 멈춰, 소스에는 실제로 존재하는
+  `<input>` 태그들이 DOM에는 전혀 나타나지 않는다(반면 그 이전에 나온 텍스트는 `inner_text`로
+  정상 추출됨). 그래서 `tests/unit/test_yeogiotae.py`의 로그인폼 필드 검증은 Playwright
+  locator가 아니라 저장된 HTML 원문에 대한 문자열 포함 검사로 작성했다 - 야놀자(Next.js)
+  fixture에서는 이 문제가 없었다(사이트별로 fixture 테스트 방식이 다를 수 있음을 염두에
+  둔다).
 
 ### 8.3 네이버예약 (booking.naver.com)
 - 네이버는 통합 계정(nid.naver.com)으로 로그인하므로, 로그인 폼 자체는 네이버 공통 로그인
