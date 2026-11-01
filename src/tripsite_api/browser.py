@@ -32,6 +32,20 @@ _DESKTOP_CHROME_USER_AGENT = (
 )
 
 
+def chromium_executable_available() -> bool:
+    """True when a Chromium binary is available to launch.
+
+    Checks the pre-installed binary first, then Playwright's own managed path. Uses the
+    sync API, so call it before the event loop starts (see mcp_server.run_server).
+    """
+    if os.path.exists(_PREINSTALLED_CHROMIUM):
+        return True
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        return os.path.exists(p.chromium.executable_path)
+
+
 class BrowserSession:
     """Owns one Chromium browser + one BrowserContext for a single site.
 

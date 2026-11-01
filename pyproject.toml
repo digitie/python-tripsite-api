@@ -11,7 +11,9 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.47",
-    "mcp>=1.2.0",
+    # Pinned to the 1.x line: the FastMCP API this server is written against was renamed
+    # (to MCPServer) in mcp 2.x. Revisit when migrating to the v2 API.
+    "mcp>=1.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +21,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
 ]
+
+[project.scripts]
+tripsite = "tripsite_api.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tripsite_api"]

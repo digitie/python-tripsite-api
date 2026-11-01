@@ -48,3 +48,7 @@ class ScrapeStructureError(TripsiteError):
 
 class CredentialsNotConfiguredError(TripsiteError):
     """The `<SITE>_ID`/`<SITE>_PW` environment variables are not set for this site."""
+
+
+class UnsupportedSiteError(TripsiteError):
+    """The requested site name is not one of the supported sites."""
