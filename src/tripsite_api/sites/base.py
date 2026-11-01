@@ -63,6 +63,7 @@ class BaseSiteClient(ABC):
         self._settings = settings
         self._throttle = LoginThrottle(self.site_name, settings)
         self._last_query_at: float | None = None
+        self._last_limit: int | None = None
         self._last_result: list[Reservation] | None = None
         # Serializes get_reservations() for THIS client instance. Pass the site's
         # SiteRegistry.lock_for(site) when wiring this up (one client instance per
@@ -126,6 +127,7 @@ class BaseSiteClient(ABC):
             if (
                 self._last_result is not None
                 and self._last_query_at is not None
+                and self._last_limit == limit
                 and now - self._last_query_at < self._settings.min_query_interval_sec
             ):
                 logger.debug(
@@ -140,19 +142,32 @@ class BaseSiteClient(ABC):
             finally:
                 await page.close()
 
-            if limit is None and len(result) > self.MAX_RESERVATIONS_UNBOUNDED:
-                logger.warning(
-                    "site=%s returned %d reservations for an unbounded query; "
-                    "truncating to MAX_RESERVATIONS_UNBOUNDED=%d (docs/DESIGN.md section 7)",
-                    self.site_name,
-                    len(result),
-                    self.MAX_RESERVATIONS_UNBOUNDED,
-                )
-                result = result[: self.MAX_RESERVATIONS_UNBOUNDED]
+            # Enforced here rather than trusted to each adapter (docs/DESIGN.md section 7).
+            cap = limit if limit is not None else self.MAX_RESERVATIONS_UNBOUNDED
+            if len(result) > cap:
+                if limit is None:
+                    logger.warning(
+                        "site=%s returned %d reservations for an unbounded query; "
+                        "truncating to MAX_RESERVATIONS_UNBOUNDED=%d",
+                        self.site_name,
+                        len(result),
+                        cap,
+                    )
+                result = result[:cap]
 
             self._last_result = result
+            self._last_limit = limit
             self._last_query_at = time.monotonic()
             return result
+
+    async def login_with_throttle(self, page: Page) -> None:
+        """login() gated by LoginThrottle (cooldown + daily cap). Every login attempt
+        goes through here - including the manual `tripsite login` path - so the
+        account-lockout protection in docs/DESIGN.md section 1 can't be bypassed.
+        Persists the new session immediately so other processes see it."""
+        self._throttle.check_and_record()
+        await self.login(page)
+        await self._session.save_storage_state()
 
     async def _get_reservations_with_retry(self, page: Page, *, limit: int | None) -> list[Reservation]:
         if await self.is_logged_in(page):
@@ -161,8 +176,7 @@ class BaseSiteClient(ABC):
             except LoginRequiredError:
                 pass  # session expired mid-call; fall through to the single retry below
 
-        self._throttle.check_and_record()
-        await self.login(page)
+        await self.login_with_throttle(page)
         # Exactly one retry, from scratch - a second LoginRequiredError propagates.
         return await self.fetch_reservations(page, limit=limit)
 

@@ -134,6 +134,22 @@ async def test_caches_result_within_min_query_interval(tmp_path: Path, session: 
     assert client.fetch_calls == 1  # second call served from cache, not re-fetched
 
 
+async def test_cache_is_not_shared_across_different_limits(tmp_path: Path, session: BrowserSession) -> None:
+    """Regression: a limit=5 result must not be served to a later limit=None caller
+    within the same query interval - that would silently return a truncated list."""
+    client = _FakeClient(
+        _CREDENTIALS,
+        session,
+        _settings(tmp_path, min_query_interval_sec=60),
+        initially_logged_in=True,
+    )
+
+    await client.get_reservations(limit=5)
+    await client.get_reservations(limit=None)
+
+    assert client.fetch_calls == 2
+
+
 async def test_does_not_cache_once_interval_elapses(tmp_path: Path, session: BrowserSession) -> None:
     client = _FakeClient(
         _CREDENTIALS,
@@ -288,3 +304,29 @@ async def test_get_reservations_serializes_concurrent_callers_on_same_instance(
     assert first == [_FAKE_RESERVATION]
     assert second == [_FAKE_RESERVATION]
     assert client.max_concurrent_fetches_seen == 1
+
+
+async def test_explicit_limit_is_enforced_even_if_the_adapter_returns_more(
+    tmp_path: Path, session: BrowserSession
+) -> None:
+    """Regression guard for docs/DESIGN.md section 7: the base class enforces the cap
+    rather than trusting each adapter to honour `limit`."""
+    client = _FakeClient(_CREDENTIALS, session, _settings(tmp_path), initially_logged_in=True)
+    client._many_results = [_FAKE_RESERVATION] * 5
+
+    result = await client.get_reservations(limit=2)
+
+    assert len(result) == 2
+
+
+async def test_successful_login_is_persisted_immediately(tmp_path: Path, session: BrowserSession) -> None:
+    """A login done by the server must reach disk now, so a separate `tripsite check` sees
+    it without waiting for the server to shut down."""
+    client = _FakeClient(_CREDENTIALS, session, _settings(tmp_path), initially_logged_in=False)
+    page = await session.new_page()
+    try:
+        await client.login_with_throttle(page)
+    finally:
+        await page.close()
+
+    assert (tmp_path / "storage_state_fake.json").exists()

@@ -11,7 +11,12 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.47",
-    "mcp>=1.2.0",
+    # 1.19 is the first release whose FastMCP passes a returned CallToolResult through
+    # unchanged, which the error reporting in mcp_server.py depends on. Verified on 1.19.0
+    # with pydantic<2.14; that mcp imports a pydantic helper removed in 2.14, so a
+    # lowest-version install with the newest pydantic fails loudly at import. Capped below
+    # 2 because the FastMCP API was renamed (to MCPServer) in 2.x.
+    "mcp>=1.19,<2",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +24,9 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
 ]
+
+[project.scripts]
+tripsite = "tripsite_api.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tripsite_api"]
