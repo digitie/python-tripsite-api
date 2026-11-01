@@ -361,20 +361,35 @@ class BaseSiteClient(ABC):
   fixture에서는 이 문제가 없었다(사이트별로 fixture 테스트 방식이 다를 수 있음을 염두에
   둔다).
 
-### 8.3 네이버예약 (booking.naver.com)
-- 네이버는 통합 계정(nid.naver.com)으로 로그인하므로, 로그인 폼 자체는 네이버 공통 로그인
-  페이지를 사용한다. 네이버는 자동화 로그인에 대한 보안 챌린지(기기 인증, 캡차)가 특히
-  적극적인 것으로 알려져 있어, 세션 재사용(storage_state)의 중요성이 다른 두 사이트보다
-  크다.
-- 예약내역은 모바일 웹 가이드 기준 `m.booking.naver.com/my/bookings` 류의 경로가 언급되나
-  비공식 출처라 실측 필요. 네이버페이 주문/예약 내역(`order.pay.naver.com`)이 더 안정적인
-  경로일 가능성도 있어 구현 착수 시 두 경로를 모두 확인 후 택일한다.
+### 8.3 네이버예약 (booking.naver.com) — Task #5에서 실측 완료 (단, 인증 후 타임라인 마크업은 미확인)
+- 네이버는 통합 계정(`nid.naver.com`)으로 로그인한다. `https://booking.naver.com/my/bookings`
+  **와** `https://m.place.naver.com/my/timeline` 둘 다, 비로그인 상태에서는
+  `https://nid.naver.com/nidlogin.login?...&url=https://m.place.naver.com/my/timeline`로
+  리다이렉트된다 - 즉 **`m.place.naver.com/my/timeline`이 실제 로그인 후 목적지**임을 확인했다
+  (뉴스에서 언급된 "네이버지도 예약 탭" 통합과 일치). 로그인 여부 판별도 이 리다이렉트를
+  이용해 "타임라인 URL로 이동했는데 호스트가 `nid.naver.com`이면 비로그인"으로 구현했다
+  (텍스트 마커가 아니라 URL 기반이라 8.1/8.2보다 더 견고하다).
+- 로그인 폼은 **예상과 달리 2-step이 아니라 한 페이지에 아이디(`#id`)/비밀번호(`#pw`) 입력란이
+  모두 있는 단일 폼**이었다(14절 Open Question에서 "2-step으로 알려짐"이라 가정했던 것과
+  다름 - 실측으로 정정). 그래도 7절의 `_enter_identifier()`/`_enter_password()` 훅은 구조적
+  분리를 위해 그대로 사용한다(단일 폼이어도 두 훅으로 나누는 것이 코드 가독성에 문제가 없음).
+  제출 버튼 텍스트는 "로그인"이지만 "패스키 로그인" 버튼도 같은 클래스로 존재하므로
+  `exact=True`로 구분해야 한다.
+- 로그인 폼에 `bvsd`/`dynamicKey`/`wtoken`/`nclicks_nsc` 등 명백한 행위 기반 봇 탐지용 hidden
+  필드가 있다. 이를 우회하려는 시도는 비범위(1절)이지만, 불필요하게 로봇처럼 보이는 것도
+  피하는 차원에서 `page.fill()`(값 직접 주입) 대신 `page.type()`(실제 키보드 이벤트,
+  `delay=30ms`)으로 입력하도록 구현했다.
 - 리스크: 네이버는 챌린지 발생 시 `TwoFactorRequiredError`로 명확히 구분해 올려, 호출자가
-  "사람 개입이 필요하다"는 신호를 받을 수 있게 한다.
-- 네이버 로그인은 아이디 입력 화면과 비밀번호 입력 화면이 분리된 2-step으로 알려져 있다.
-  `NaverClient.login()`은 7절에서 정의한 `_enter_identifier()` / `_enter_password()` 훅을
-  각각 구현하고, 그 사이의 화면 전환을 `page.wait_for_selector`로 기다린다(단일 폼으로
-  가정하지 않음).
+  "사람 개입이 필요하다"는 신호를 받을 수 있게 한다. 실제 챌린지 화면을 아직 관찰하지
+  못했으므로 마커 문구 목록("자동입력 방지", "2단계 인증", "기기 인증" 등)은 추정치다.
+- **구현 상태**: `login()`/`is_logged_in()`은 위 실측대로 구현했다. `fetch_reservations()`는
+  타임라인 URL 도달 + 로그인 상태 확인까지만 하고, 실제 방문/예약 카드 마크업 파싱은
+  `ScrapeStructureError`를 던지는 TODO로 남겨뒀다 - 실제 NAVER_ID/NAVER_PW로 로그인 후
+  관찰해야 완성할 수 있다.
+- **네트워크 참고**: `order.pay.naver.com`은 이 샌드박스에서 `ERR_NAME_NOT_RESOLVED`,
+  `new-m.booking.naver.com`은 `ERR_TUNNEL_CONNECTION_FAILED`였다(둘 다 허용 도메인 목록에
+  없는 것으로 추정 - 실제로는 쓰지 않게 됐으므로 문제 없음). 실사용 중 추가 네이버
+  서브도메인이 필요해지면 환경의 네트워크 허용 목록에 추가해야 한다.
 
 > 구현 작업자는 Task #3/#4/#5(사이트별 어댑터) 착수 시, 먼저 `TRIPSITE_HEADLESS=false`로
 > `cli.py login <site>`를 실제 계정으로 1회 실행해 로그인/예약 페이지의 실제 URL·DOM을
