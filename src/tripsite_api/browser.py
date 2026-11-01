@@ -86,13 +86,13 @@ class BrowserSession:
             try:
                 await self._context.close()
             except Exception:
-                pass
+                logger.debug("context.close() failed for site=%s (already dead?)", self.site, exc_info=True)
             self._context = None
         if self._browser is not None:
             try:
                 await self._browser.close()
             except Exception:
-                pass
+                logger.debug("browser.close() failed for site=%s (already dead?)", self.site, exc_info=True)
             self._browser = None
         if self._playwright is not None:
             await self._playwright.stop()

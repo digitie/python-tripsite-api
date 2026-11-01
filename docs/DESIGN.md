@@ -142,9 +142,19 @@ MCP 서버는 이 예외들을 잡아 tool 응답의 `isError`/에러 메시지�
     `TRIPSITE_STATE_DIR/login_attempts_<site>.json`에 기록.
   - `TRIPSITE_MIN_QUERY_INTERVAL_SEC` (기본 `30`): 같은 사이트에 대한 `fetch_reservations`
     재호출 최소 간격. 이 간격 내 재호출은 마지막 결과를 그대로 캐시에서 반환한다(6절).
-- `Settings.for_site(site: str) -> Credentials`가 env var를 읽고, 없으면
-  `CredentialsNotConfiguredError`를 던진다. 비밀번호를 로그에 절대 출력하지 않는다
-  (`repr`/`__str__` 오버라이드로 마스킹).
+- `LoginThrottle.check_and_record()`의 읽기-수정-쓰기는 `fcntl.flock`으로 보호되는 하나의
+  크리티컬 섹션이다. 같은 프로세스 내 동시 호출뿐 아니라, MCP 서버와 `cli.py`가 동일
+  `TRIPSITE_STATE_DIR`를 공유하는 두 개의 서로 다른 프로세스(9절의 운영 전제)가 동시에
+  같은 사이트의 로그인을 기록하려는 경우까지 보호 범위에 들어간다.
+- `credentials_for_site(site: str) -> Credentials`가 env var를 읽고, 없으면
+  `CredentialsNotConfiguredError`를 던진다. 비밀번호 필드는 `str`이 아니라 `SecretStr`
+  래퍼 타입으로 감싼다 - `Credentials.__repr__`/`__str__` 오버라이드만으로는
+  `dataclasses.asdict()`/`vars()`/`__dict__` 같은 경로를 가리지 못하기 때문이다(이 함수들은
+  dataclass의 `__repr__`을 거치지 않고 필드 값을 그대로 꺼낸다). `SecretStr`은 dataclass가
+  아니므로 `asdict()`가 그 내부를 분해하지 못하고 객체 자체를 남기며, 그 객체의 `repr`이
+  마스킹되어 있어 어떤 경로로 출력되더라도 평문이 드러나지 않는다. 비밀번호 원문은
+  `credentials.password.get_secret_value()`로만 꺼낸다(사이트 어댑터의 `login()`에서
+  `page.fill()` 등에 전달할 때).
 - `storage_state` 파일은 평문 쿠키/토큰을 담으므로 `0600` 권한으로 저장하고, 역시 git에
   올라가지 않도록 리포 루트 밖(`~/.tripsite-api/state`)을 기본값으로 둔다. 암호화는 v1
   범위에는 없으나, README에 "OS 백업 도구가 이 디렉터리를 평문으로 백업하지 않도록 주의"
@@ -154,13 +164,18 @@ MCP 서버는 이 예외들을 잡아 tool 응답의 `isError`/에러 메시지�
 
 ```python
 class BrowserSession:
-    def __init__(self, site: str, *, headless: bool, state_dir: Path): ...
+    def __init__(self, site: str, *, headless: bool, state_dir: Path, nav_timeout_ms: int = 15_000): ...
     async def __aenter__(self) -> "BrowserSession": ...  # playwright 기동, context 생성
     async def __aexit__(self, ...): ...                  # storage_state 저장 후 정리
     async def new_page(self) -> Page: ...                # 항상 try/finally로 close 책임은 호출자
     async def is_connected(self) -> bool: ...             # health check
     async def restart(self) -> None: ...                  # 끊긴 browser/context 재기동
 ```
+
+`is_connected()`/`restart()` 체크는 `new_page()` 내부에서 자체적으로 수행한다(아래 "소유권"
+문단이 말하는 것은 *세션 인스턴스*의 소유권이며, 매 호출 전 health check를 명령하는 주체가
+`SiteRegistry`라는 뜻은 아니다 - 레지스트리는 세션을 1개만 만들어 쥐고 있을 뿐, 그 세션이
+스스로 재기동을 판단한다).
 
 - 사이트별로 `storage_state_<site>.json`을 캐시해, 매 호출마다 로그인하지 않고 세션 쿠키를
   재사용한다. 이는 (a) 호출 지연을 줄이고 (b) 반복 로그인으로 인한 이상 탐지 가능성을 줄이기
@@ -182,10 +197,20 @@ class BrowserSession:
   `fetch_reservations()`가 페이지네이션 중간에 세션이 끊겨 `LoginRequiredError`를 올리는
   경우에도 동일하게 적용된다 — `fetch_reservations()`는 몇 페이지째 읽다가 끊겼든 처음부터
   다시 시도되며, 재시도 1회 한도는 이 전체 호출 단위로 센다(무한 루프 방지).
-- 브라우저 크래시/리소스 누수 대응: 레지스트리가 매 호출 전 `is_connected()`로 상태를
-  확인하고, 끊겨 있으면 `restart()`로 재기동한다. `new_page()`로 연 페이지는 호출자가
+- 브라우저 크래시/리소스 누수 대응: `BrowserSession.new_page()`가 호출될 때마다
+  `is_connected()`로 상태를 확인하고, 끊겨 있으면 `restart()`로 재기동한다. `close()`의
+  각 정리 단계(storage_state 저장, context/browser 종료)는 이미 죽은 핸들을 다루는
+  `restart()` 경로에서도 안전하도록 예외를 삼키지만, 완전히 무음은 아니고
+  `logger.debug`/`logger.warning`으로 남긴다. `new_page()`로 연 페이지는 호출자가
   `try/finally`로 반드시 `close()`하는 것을 계약으로 명시한다(열린 채 방치된 페이지가
   누적되는 것을 막기 위함).
+- `SiteRegistry.session_for()`는 사이트별 세션을 최초 생성할 때 `await session.start()`로
+  await하는 구간이 있어, 동시에 같은 사이트에 대한 첫 호출이 두 번 들어오면 둘 다 "아직 없음"
+  을 보고 세션을 중복 생성할 수 있다(하나는 레지스트리에서 참조를 잃어 Chromium 프로세스가
+  누수). 이를 막기 위해 `session_for()`는 생성 구간 전체를 레지스트리 전역의
+  `asyncio.Lock`(`_creation_lock`) 하나로 감싼다. 이 락은 "사이트당 최초 1회뿐인 생성"만
+  직렬화하므로, 이미 생성된 세션에 대한 이후의 정상 조회/락(`lock_for(site)`)에는 영향이
+  없고 "사이트 간 독립적으로 동작한다"는 설계 원칙을 깨지 않는다.
 
 ## 7. 사이트 어댑터 인터페이스 (`sites/base.py`)
 
@@ -194,7 +219,14 @@ class BaseSiteClient(ABC):
     site_name: ClassVar[str]
     MAX_RESERVATIONS_UNBOUNDED: ClassVar[int] = 500  # limit=None일 때의 하드 상한
 
-    def __init__(self, credentials: Credentials, session: BrowserSession): ...
+    def __init__(
+        self,
+        credentials: Credentials,
+        session: BrowserSession,
+        settings: Settings,
+        *,
+        lock: asyncio.Lock | None = None,
+    ): ...
 
     @abstractmethod
     async def login(self, page: Page) -> None:
@@ -232,8 +264,18 @@ class BaseSiteClient(ABC):
         구현한다. **재로그인 재시도 루프는 이 메서드에만 존재한다**: `is_logged_in()`이
         False거나 `fetch_reservations()`가 `LoginRequiredError`를 던지면 `login()`을
         호출한 뒤 `fetch_reservations()`를 처음부터 1회만 재시도한다(그래도 실패하면
-        예외를 그대로 전파). `BrowserSession`은 이 판단에 관여하지 않는다(6절)."""
+        예외를 그대로 전파). `BrowserSession`은 이 판단에 관여하지 않는다(6절).
+        이 메서드는 호출 전체를 생성자에서 받은 `lock`(기본값은 인스턴스 전용 Lock)으로
+        감싸므로, 같은 클라이언트 인스턴스에 대한 동시 호출이 캐시 판단과 브라우저 조작을
+        동시에 밟는 레이스를 막는다. `fetch_reservations()`가 반환한 결과가 `limit=None`
+        인데도 `MAX_RESERVATIONS_UNBOUNDED`를 넘으면 **이 메서드가** 그 자리에서 잘라낸다
+        - 각 사이트 어댑터가 상한을 스스로 지키는 것에 의존하지 않는다."""
 ```
+
+`_dump_debug_artifacts(page, *, label, mask_password)`는 스크린샷/HTML을 저장하고
+`ScrapeStructureError`를 **반환만** 한다(테스트에서 내용을 들여다보기 쉽게 하기 위함).
+실제 사이트 어댑터는 그 반환값을 그냥 버리기 쉬우므로, 항상 예외를 직접 던지는
+`_raise_structure_error(page, *, label, mask_password) -> NoReturn` 쪽을 호출해야 한다.
 
 - 각 사이트 모듈은 선택자(selector)를 **모듈 상단의 상수 딕셔너리**로 모아둔다
   (`SELECTORS = {...}`). DOM 변경 대응 시 코드 로직을 건드리지 않고 상수만 고치면 되게 하기
@@ -368,6 +410,10 @@ Python 공식 `mcp` SDK(FastMCP)를 사용해 stdio 기반 MCP 서버로 구현�
 - [ ] 디버그 덤프(`ScrapeStructureError` 첨부 HTML/스크린샷) 저장 전 비밀번호 필드 마스킹
       처리가 실제로 호출되는지 확인 (7절)
 - [ ] `TRIPSITE_STATE_DIR`를 OS 백업 도구가 평문으로 백업하지 않도록 README에 경고 추가
+- [ ] `Credentials.password`가 `dataclasses.asdict()`/`vars()`/`__dict__` 경로로도 평문
+      노출되지 않음 (`SecretStr` 래퍼로 검증; `repr`/`__str__` 오버라이드만으로는 불충분)
+- [ ] `storage_state_<site>.json`/`login_attempts_<site>.json` 저장 시 실제로 `0600`
+      권한이 적용되는지 테스트로 검증 (구현만 하고 끝나지 않도록)
 - [ ] 커밋 전 `git diff`/`git status`로 실수로 추가된 state/env 파일 여부 확인
 
 ## 13. 구현 로드맵 (Task 매핑)

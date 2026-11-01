@@ -33,6 +33,24 @@ async def test_session_for_reuses_the_same_session_per_site(tmp_path: Path) -> N
         await registry.close_all()
 
 
+async def test_session_for_handles_concurrent_first_calls_without_leaking_a_session(
+    tmp_path: Path,
+) -> None:
+    """Regression test for a review finding: session_for()'s check-then-create had no
+    lock around the `await session.start()` in between, so two concurrent first
+    calls for the same site could both see no cached session and both launch a
+    BrowserSession - leaking the loser's Chromium process.
+    """
+    registry = SiteRegistry(_settings(tmp_path))
+    try:
+        first, second = await asyncio.gather(
+            registry.session_for("yanolja"), registry.session_for("yanolja")
+        )
+        assert first is second
+    finally:
+        await registry.close_all()
+
+
 async def test_session_for_creates_independent_sessions_per_site(tmp_path: Path) -> None:
     registry = SiteRegistry(_settings(tmp_path))
     try:
@@ -52,23 +70,29 @@ async def test_lock_for_returns_independent_locks_per_site(tmp_path: Path) -> No
 
 
 async def test_different_site_locks_do_not_block_each_other(tmp_path: Path) -> None:
+    """Deterministic (no sleep/timing): proves naver's lock can be acquired and
+    released *while* yanolja's lock is still held, which would be impossible if both
+    sites shared a single lock.
+    """
     registry = SiteRegistry(_settings(tmp_path))
-    order: list[str] = []
+    yanolja_holding = asyncio.Event()
+    naver_done = asyncio.Event()
 
-    async def hold_lock_and_record(site: str, hold_seconds: float) -> None:
-        async with registry.lock_for(site):
-            order.append(f"{site}:start")
-            await asyncio.sleep(hold_seconds)
-            order.append(f"{site}:end")
+    async def hold_yanolja_until_naver_is_done() -> None:
+        async with registry.lock_for("yanolja"):
+            yanolja_holding.set()
+            await naver_done.wait()
 
-    await asyncio.gather(
-        hold_lock_and_record("yanolja", 0.2),
-        hold_lock_and_record("naver", 0.05),
+    async def acquire_naver_while_yanolja_is_held() -> None:
+        await yanolja_holding.wait()
+        async with registry.lock_for("naver"):
+            pass
+        naver_done.set()
+
+    await asyncio.wait_for(
+        asyncio.gather(hold_yanolja_until_naver_is_done(), acquire_naver_while_yanolja_is_held()),
+        timeout=5,
     )
-
-    # naver's much shorter hold finishes before yanolja's, proving the two locks ran
-    # concurrently rather than being serialized behind a single shared lock.
-    assert order.index("naver:end") < order.index("yanolja:end")
 
 
 async def test_same_site_lock_serializes_concurrent_callers(tmp_path: Path) -> None:

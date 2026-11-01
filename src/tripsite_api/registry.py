@@ -26,24 +26,39 @@ class SiteRegistry:
         self._settings = settings
         self._sessions: dict[str, BrowserSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Guards session_for()'s check-then-create sequence below. A single lock for
+        # all sites is fine here: it only serializes the (rare, one-time-per-site)
+        # creation path, never normal per-site operation, so it doesn't undermine the
+        # "different sites run independently" property the per-site locks provide.
+        self._creation_lock = asyncio.Lock()
 
     def lock_for(self, site: str) -> asyncio.Lock:
+        # Safe without a lock: dict lookup/insert here has no `await` in between, so
+        # no other coroutine can interleave on this single-threaded event loop.
         if site not in self._locks:
             self._locks[site] = asyncio.Lock()
         return self._locks[site]
 
     async def session_for(self, site: str) -> BrowserSession:
         session = self._sessions.get(site)
-        if session is None:
-            session = BrowserSession(
-                site,
-                headless=self._settings.headless,
-                state_dir=self._settings.state_dir,
-                nav_timeout_ms=self._settings.nav_timeout_ms,
-            )
-            await session.start()
-            self._sessions[site] = session
-        return session
+        if session is not None:
+            return session
+
+        # Unlike lock_for(), this path awaits session.start() - without a lock, two
+        # concurrent first calls for the same site would both see no cached session
+        # and both launch a BrowserSession/Chromium process, leaking one of them.
+        async with self._creation_lock:
+            session = self._sessions.get(site)  # re-check: may have been created above
+            if session is None:
+                session = BrowserSession(
+                    site,
+                    headless=self._settings.headless,
+                    state_dir=self._settings.state_dir,
+                    nav_timeout_ms=self._settings.nav_timeout_ms,
+                )
+                await session.start()
+                self._sessions[site] = session
+            return session
 
     async def close_all(self) -> None:
         for session in self._sessions.values():

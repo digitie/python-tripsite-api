@@ -3,13 +3,14 @@ single-retry re-login, query-result caching, and password-masking in debug dumps
 A fake adapter stands in for a real site so this test doesn't need network access.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
 from tripsite_api.browser import BrowserSession
-from tripsite_api.config import Credentials, Settings
-from tripsite_api.errors import LoginRequiredError
+from tripsite_api.config import Credentials, SecretStr, Settings
+from tripsite_api.errors import LoginRequiredError, ScrapeStructureError
 from tripsite_api.models import Reservation, ReservationCategory, ReservationStatus
 from tripsite_api.sites.base import BaseSiteClient
 
@@ -37,6 +38,10 @@ class _FakeClient(BaseSiteClient):
         self.fetch_calls = 0
         self.logged_in = initially_logged_in
         self.remaining_failures = fail_fetch_times
+        self._many_results: list | None = None
+        self.fetch_delay_seconds = 0.0
+        self._concurrent_fetches = 0
+        self.max_concurrent_fetches_seen = 0
 
     async def login(self, page) -> None:
         self.login_calls += 1
@@ -50,7 +55,15 @@ class _FakeClient(BaseSiteClient):
         if self.remaining_failures > 0:
             self.remaining_failures -= 1
             raise LoginRequiredError("fake session expired")
-        return [_FAKE_RESERVATION]
+
+        self._concurrent_fetches += 1
+        self.max_concurrent_fetches_seen = max(self.max_concurrent_fetches_seen, self._concurrent_fetches)
+        try:
+            if self.fetch_delay_seconds:
+                await asyncio.sleep(self.fetch_delay_seconds)
+            return list(self._many_results) if self._many_results is not None else [_FAKE_RESERVATION]
+        finally:
+            self._concurrent_fetches -= 1
 
 
 def _settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -66,7 +79,7 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
     return Settings(**defaults)  # type: ignore[arg-type]
 
 
-_CREDENTIALS = Credentials(site="fake", identifier="id", password="pw")
+_CREDENTIALS = Credentials(site="fake", identifier="id", password=SecretStr("pw"))
 
 
 @pytest.fixture
@@ -186,3 +199,99 @@ async def test_dump_debug_artifacts_without_masking_includes_password(
         assert "supersecret123" in html  # demonstrates masking is doing real work above
     finally:
         await page.close()
+
+
+async def test_dump_debug_artifacts_masks_password_synced_to_attribute_by_site_js(
+    tmp_path: Path, session: BrowserSession
+) -> None:
+    """Realistic case flagged in review: a site's own JS mirrors the live input value
+    onto the `value` attribute as the user types (some custom components do this -
+    page.fill() alone normally does NOT get reflected into the attribute at all).
+    """
+    client = _FakeClient(_CREDENTIALS, session, _settings(tmp_path))
+    page = await session.new_page()
+    try:
+        await page.set_content(
+            '<html><body>'
+            '<input id="pw" type="password" autocomplete="current-password">'
+            "<script>"
+            "document.getElementById('pw').addEventListener('input', (e) => {"
+            "  e.target.setAttribute('value', e.target.value);"
+            "});"
+            "</script>"
+            "</body></html>"
+        )
+        await page.fill("#pw", "supersecret123")
+
+        error = await client._dump_debug_artifacts(page, label="login", mask_password=True)
+
+        html = Path(error.html_path).read_text(encoding="utf-8")
+        assert "supersecret123" not in html
+    finally:
+        await page.close()
+
+
+async def test_dump_debug_artifacts_masks_password_field_identified_by_name_only(
+    tmp_path: Path, session: BrowserSession
+) -> None:
+    """A show-password toggle can switch `type` to "text" before a dump is taken; the
+    masking selector also matches on name/id/autocomplete so it isn't solely
+    dependent on `type="password"` still being present.
+    """
+    client = _FakeClient(_CREDENTIALS, session, _settings(tmp_path))
+    page = await session.new_page()
+    try:
+        await page.set_content(
+            '<html><body>'
+            '<input name="user_password" type="text" value="supersecret123">'
+            "</body></html>"
+        )
+        error = await client._dump_debug_artifacts(page, label="login", mask_password=True)
+
+        html = Path(error.html_path).read_text(encoding="utf-8")
+        assert "supersecret123" not in html
+    finally:
+        await page.close()
+
+
+async def test_raise_structure_error_raises_the_captured_error(
+    tmp_path: Path, session: BrowserSession
+) -> None:
+    client = _FakeClient(_CREDENTIALS, session, _settings(tmp_path))
+    page = await session.new_page()
+    try:
+        await page.set_content("<html><body>unexpected layout</body></html>")
+        with pytest.raises(ScrapeStructureError) as exc_info:
+            await client._raise_structure_error(page, label="listing", mask_password=False)
+        assert exc_info.value.html_path is not None
+    finally:
+        await page.close()
+
+
+async def test_get_reservations_truncates_unbounded_query_to_hard_cap(
+    tmp_path: Path, session: BrowserSession
+) -> None:
+    client = _FakeClient(_CREDENTIALS, session, _settings(tmp_path), initially_logged_in=True)
+    client.MAX_RESERVATIONS_UNBOUNDED = 2  # instance override, cheaper than 500 real rows
+    client._many_results = [_FAKE_RESERVATION] * 5
+
+    result = await client.get_reservations(limit=None)
+
+    assert len(result) == 2
+
+
+async def test_get_reservations_serializes_concurrent_callers_on_same_instance(
+    tmp_path: Path, session: BrowserSession
+) -> None:
+    """Without the instance lock, two concurrent callers could both see a stale cache
+    and both drive fetch_reservations()/login() at once (review finding)."""
+    client = _FakeClient(
+        _CREDENTIALS, session, _settings(tmp_path, min_query_interval_sec=0), initially_logged_in=True
+    )
+    client.fetch_delay_seconds = 0.05
+
+    first, second = await asyncio.gather(client.get_reservations(), client.get_reservations())
+
+    assert first == [_FAKE_RESERVATION]
+    assert second == [_FAKE_RESERVATION]
+    assert client.max_concurrent_fetches_seen == 1

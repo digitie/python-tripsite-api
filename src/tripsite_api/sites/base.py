@@ -5,11 +5,12 @@ See docs/DESIGN.md section 7 for the full contract this class encodes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import ClassVar
+from typing import ClassVar, NoReturn
 
 from playwright.async_api import Page
 
@@ -20,10 +21,26 @@ from ..models import Reservation
 
 logger = logging.getLogger(__name__)
 
+# Defense in depth, not a complete guarantee: page.fill()'d values generally aren't
+# reflected into the HTML `value` *attribute` at all (only the live DOM property),
+# so outerHTML/page.content() already tend not to leak them. The real residual risk
+# is a site that itself mirrors input values onto attributes (some custom JS
+# components do), or toggles a password field's `type` to "text" (show-password),
+# which is why this also matches on autocomplete/name/id, not just type="password".
 _MASK_PASSWORD_JS = """() => {
     const clone = document.documentElement.cloneNode(true);
-    clone.querySelectorAll('input[type="password"]').forEach((el) => {
-        el.setAttribute('value', '***MASKED***');
+    const isPasswordish = (el) => {
+        if ((el.getAttribute('type') || '').toLowerCase() === 'password') return true;
+        const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+        if (autocomplete === 'current-password' || autocomplete === 'new-password') return true;
+        const nameOrId = ((el.getAttribute('name') || '') + ' ' + (el.getAttribute('id') || '')).toLowerCase();
+        return nameOrId.includes('password') || nameOrId.includes('passwd');
+    };
+    clone.querySelectorAll('input').forEach((el) => {
+        if (isPasswordish(el)) {
+            el.setAttribute('value', '***MASKED***');
+            el.value = '***MASKED***';
+        }
     });
     return clone.outerHTML;
 }"""
@@ -33,13 +50,26 @@ class BaseSiteClient(ABC):
     site_name: ClassVar[str]
     MAX_RESERVATIONS_UNBOUNDED: ClassVar[int] = 500
 
-    def __init__(self, credentials: Credentials, session: BrowserSession, settings: Settings) -> None:
+    def __init__(
+        self,
+        credentials: Credentials,
+        session: BrowserSession,
+        settings: Settings,
+        *,
+        lock: asyncio.Lock | None = None,
+    ) -> None:
         self._credentials = credentials
         self._session = session
         self._settings = settings
         self._throttle = LoginThrottle(self.site_name, settings)
         self._last_query_at: float | None = None
         self._last_result: list[Reservation] | None = None
+        # Serializes get_reservations() for THIS client instance. Pass the site's
+        # SiteRegistry.lock_for(site) when wiring this up (one client instance per
+        # site, as the MCP server does) so it's the same lock the registry hands out
+        # elsewhere; defaulting to a fresh Lock still protects a single instance
+        # against concurrent callers even if the caller doesn't pass one in.
+        self._lock = lock if lock is not None else asyncio.Lock()
 
     # ---- Abstract contract (one implementation per site) ----
 
@@ -87,29 +117,42 @@ class BaseSiteClient(ABC):
         """login-check -> login() if needed -> fetch_reservations(), with caching.
 
         This is the *only* place a re-login is retried (at most once) - see
-        docs/DESIGN.md sections 6/7.
+        docs/DESIGN.md sections 6/7. Holds this client's lock for the whole call, so
+        two concurrent callers on the same client instance can't both decide the
+        cache is stale and both drive the browser/throttle/login at once.
         """
-        now = time.monotonic()
-        if (
-            self._last_result is not None
-            and self._last_query_at is not None
-            and now - self._last_query_at < self._settings.min_query_interval_sec
-        ):
-            logger.debug(
-                "Returning cached reservations for site=%s (within TRIPSITE_MIN_QUERY_INTERVAL_SEC)",
-                self.site_name,
-            )
-            return self._last_result
+        async with self._lock:
+            now = time.monotonic()
+            if (
+                self._last_result is not None
+                and self._last_query_at is not None
+                and now - self._last_query_at < self._settings.min_query_interval_sec
+            ):
+                logger.debug(
+                    "Returning cached reservations for site=%s (within TRIPSITE_MIN_QUERY_INTERVAL_SEC)",
+                    self.site_name,
+                )
+                return self._last_result
 
-        page = await self._session.new_page()
-        try:
-            result = await self._get_reservations_with_retry(page, limit=limit)
-        finally:
-            await page.close()
+            page = await self._session.new_page()
+            try:
+                result = await self._get_reservations_with_retry(page, limit=limit)
+            finally:
+                await page.close()
 
-        self._last_result = result
-        self._last_query_at = time.monotonic()
-        return result
+            if limit is None and len(result) > self.MAX_RESERVATIONS_UNBOUNDED:
+                logger.warning(
+                    "site=%s returned %d reservations for an unbounded query; "
+                    "truncating to MAX_RESERVATIONS_UNBOUNDED=%d (docs/DESIGN.md section 7)",
+                    self.site_name,
+                    len(result),
+                    self.MAX_RESERVATIONS_UNBOUNDED,
+                )
+                result = result[: self.MAX_RESERVATIONS_UNBOUNDED]
+
+            self._last_result = result
+            self._last_query_at = time.monotonic()
+            return result
 
     async def _get_reservations_with_retry(self, page: Page, *, limit: int | None) -> list[Reservation]:
         if await self.is_logged_in(page):
@@ -124,6 +167,17 @@ class BaseSiteClient(ABC):
         return await self.fetch_reservations(page, limit=limit)
 
     # ---- Shared helpers for subclasses ----
+
+    async def _raise_structure_error(
+        self, page: Page, *, label: str, mask_password: bool
+    ) -> NoReturn:
+        """Capture debug artifacts and raise the resulting ScrapeStructureError.
+
+        Prefer this over calling `_dump_debug_artifacts()` directly: that helper only
+        *returns* the exception, so a call site that forgets to `raise` it would
+        silently swallow a structural failure.
+        """
+        raise await self._dump_debug_artifacts(page, label=label, mask_password=mask_password)
 
     async def _dump_debug_artifacts(
         self, page: Page, *, label: str, mask_password: bool
