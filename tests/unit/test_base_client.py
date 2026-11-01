@@ -82,13 +82,6 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
 _CREDENTIALS = Credentials(site="fake", identifier="id", password=SecretStr("pw"))
 
 
-@pytest.fixture
-async def session(tmp_path: Path):
-    s = BrowserSession("fake", headless=True, state_dir=tmp_path)
-    async with s:
-        yield s
-
-
 async def test_logs_in_when_no_cached_session(tmp_path: Path, session: BrowserSession) -> None:
     client = _FakeClient(
         _CREDENTIALS, session, _settings(tmp_path), initially_logged_in=False
