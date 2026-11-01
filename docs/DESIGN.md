@@ -296,14 +296,37 @@ class BaseSiteClient(ABC):
 해당 사이트들에 직접 접속해 사전 조사를 하지 못했다 — 구현 단계에서 네트워크 허용 후 실측
 예정). 아래는 설계 시점의 가정이며, 구현 착수 시 가장 먼저 실측하여 본 문서를 갱신한다.
 
-### 8.1 야놀자 (yanolja.com)
-- 로그인: `https://www.yanolja.com` 상단 로그인 → ID/PW 로그인 폼 또는 소셜 로그인(카카오/
-  네이버/구글). 이 라이브러리는 **ID/PW 자체 로그인 폼만** 지원한다(소셜 로그인은 각 소셜
-  서비스의 OAuth 흐름까지 자동화해야 해서 범위를 벗어남 — README에 한계로 명시).
-- 예약내역: 로그인 후 마이페이지 내 "예약내역" 메뉴. 정확한 경로는 구현 착수 시 실측.
-- 리스크: SPA 렌더링(React 등)으로 추정되며, 요소 대기는 `networkidle`보다
-  `page.wait_for_selector`를 우선한다(SPA는 지속적 polling/analytics 요청으로 networkidle이
-  영원히 안 올 수 있음).
+### 8.1 야놀자 (yanolja.com) — Task #3에서 실측 완료 (단, 인증 후 예약목록 마크업은 미확인)
+- 실제 서비스 도메인은 `nol.yanolja.com`(Next.js SPA)이며, `www.yanolja.com`은 쓰지 않는다.
+  Playwright 기본 UA로 접속하면 403이 뜨므로, `browser.py`의 `BrowserSession.start()`가
+  모든 사이트 공통으로 데스크톱 Chrome `User-Agent` + `locale="ko-KR"`를 `new_context()`에
+  적용하도록 고쳤다(한 사이트에서 발견했지만 세 사이트 모두 비슷한 소비자 서비스라 공통
+  적용이 합리적이라고 판단; 여기어때/네이버에서 다른 값이 필요하면 Task #4/#5에서 조정).
+- 로그인: `https://nol.yanolja.com/login` → `https://accounts.yanolja.com/v3/login?...`로
+  리다이렉트. 소셜 로그인(카카오/네이버/구글/애플) 버튼들과 "메일로 시작하기" 버튼이 있고,
+  이 라이브러리는 **"메일로 시작하기"(ID/PW) 경로만** 지원한다(소셜 로그인은 범위 밖, README에
+  한계로 명시). "메일로 시작하기" 클릭 시 `https://accounts.yanolja.com/v3/login/email?...`로
+  이동하며, 폼은 `#email`(text), `#password`(password), 제출 버튼 텍스트 "로그인하기"로
+  구성된다. 제출 버튼은 접근성 트리상 `get_by_role("button", ...)`로 안정적으로 잡히지 않아
+  (실제 사이트에서도 검증 필요 - 정적 fixture에서는 확실히 실패) `get_by_text(...)`를 쓴다.
+- 로그인 여부 판별: `https://nol.yanolja.com/mypage` (실제로는 `/member/mypage`로 리다이렉트)
+  접속 후 본문에 **"로그인 또는 회원가입하기"** 문구가 있으면 비로그인 상태다. 로그인 성공
+  후 이 문구가 사라지는지는 실제 계정으로 미검증(Task #3 완료 조건).
+- 예약내역: 마이페이지의 "NOL 예약 내역" 섹션 아래 "국내숙소/레저/교통" 등 카테고리별
+  하위 항목이 실제 진입점이다(섹션 제목 자체는 클릭 불가). 비로그인 상태에서 "국내숙소/레저/
+  교통"을 클릭하면 `https://nol.yanolja.com/visitorlogin?type=platformOrder`(비회원 예약조회)
+  로 이동한다 - 이는 로그인 상태에서의 목적지와 다를 것으로 추정되지만, **실제 로그인 후
+  이동하는 목적지와 그 페이지의 예약 카드 마크업은 아직 관찰하지 못했다**(자격증명 없이는
+  확인 불가). 2단계 전 "(구) NOL 인터파크 예약 내역"이라는 별도 섹션도 있어, 구 인터파크
+  계정으로 예약한 내역은 별도 페이지일 수 있다 - 이번 구현 범위에서는 "NOL 예약 내역 > 국내
+  숙소/레저/교통"만 다루고 인터파크 레거시 예약은 비범위로 둔다(README에 명시).
+- **구현 상태**: `login()`/`is_logged_in()`은 위 실측 내용대로 구현했다. `fetch_reservations()`
+  는 로그인 여부 재확인 + 예약내역 진입 클릭까지만 구현하고, 그 뒤 실제 예약 카드 파싱은
+  `ScrapeStructureError`를 던지는 TODO로 남겨뒀다(`sites/yanolja.py` 모듈 docstring 참고) -
+  실제 YANOLJA_ID/YANOLJA_PW로 로그인 후 관찰해야 완성할 수 있다.
+- 리스크: Next.js SPA라 `networkidle` 대기가 느리거나 불안정할 수 있음 - 지금까지는 동작했지만
+  실제 로그인 플로우(리다이렉트가 많음)에서 타임아웃이 나면 `page.wait_for_selector` 기반
+  대기로 전환을 검토한다.
 
 ### 8.2 여기어때 (goodchoice.kr, 구 yeogiotae.com)
 - 공식 "여기어때" 서비스 도메인은 `goodchoice.kr`로 이전되었다는 정보가 있으나, 리다이렉트

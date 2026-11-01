@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 # machine that ran `playwright install chromium`.
 _PREINSTALLED_CHROMIUM = "/opt/pw-browsers/chromium"
 
+# All three target sites are Korean consumer web apps behind bot-detection that 403s
+# Playwright's default UA/locale outright (confirmed against nol.yanolja.com while
+# building sites/yanolja.py - see docs/DESIGN.md section 8.1). A plain desktop Chrome
+# UA + ko-KR locale was enough to pass; this isn't meant to evade detection (out of
+# scope per docs/DESIGN.md section 1), just to look like an ordinary browser.
+_DESKTOP_CHROME_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+
 
 class BrowserSession:
     """Owns one Chromium browser + one BrowserContext for a single site.
@@ -68,7 +78,11 @@ class BrowserSession:
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
 
         storage_state = str(self._storage_state_path) if self._storage_state_path.exists() else None
-        self._context = await self._browser.new_context(storage_state=storage_state)
+        self._context = await self._browser.new_context(
+            storage_state=storage_state,
+            user_agent=_DESKTOP_CHROME_USER_AGENT,
+            locale="ko-KR",
+        )
         self._context.set_default_navigation_timeout(self._nav_timeout_ms)
         self._context.set_default_timeout(self._nav_timeout_ms)
 
