@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets / credentials - never commit these
+.env
+*.secret.json
+
+# Runtime state: session cookies, debug dumps, login-attempt counters.
+# Default TRIPSITE_STATE_DIR lives outside the repo (~/.tripsite-api), but
+# guard against someone pointing it inside the repo by accident.
+.tripsite-api/
+storage_state_*.json
+login_attempts_*.json
+debug/
