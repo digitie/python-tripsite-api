@@ -4,6 +4,7 @@ The registry still starts a real headless Chromium for sessions it hands out, wh
 cheap here and keeps the browser lifecycle honest.
 """
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -132,3 +133,26 @@ def test_error_payload_passes_value_errors_through_for_argument_problems() -> No
 
 def test_tripsite_error_base_is_handled_as_domain_error() -> None:
     assert error_payload(TripsiteError("generic"))["error_type"] == "TripsiteError"
+
+
+async def test_concurrent_first_calls_for_one_site_share_a_single_client(tmp_path: Path) -> None:
+    """Regression: two first calls that both await the browser start must not each build a
+    client - the second would discard the first's query cache."""
+    built: list[str] = []
+
+    def factory(credentials, session, settings, *, lock=None):
+        built.append(credentials.site)
+        return FakeClient(credentials.site, {})
+
+    service = ReservationService(
+        make_settings(tmp_path), credentials_loader=credentials_loader({"naver"}), client_factory=factory
+    )
+    try:
+        await asyncio.gather(
+            service.check_login_status("naver"),
+            service.get_reservations("naver"),
+        )
+    finally:
+        await service.close()
+
+    assert built == ["naver"]

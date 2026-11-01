@@ -88,6 +88,11 @@ class ReservationService:
             return client
         credentials = self._credentials_loader(site)
         session = await self._registry.session_for(site)
+        # Re-check after the await: a concurrent first call may have stored a client while
+        # we were starting the browser. Building a second one would discard its query cache.
+        client = self._clients.get(site)
+        if client is not None:
+            return client
         factory = self._client_factory or client_factory_for(site)
         client = factory(credentials, session, self._settings, lock=self._registry.lock_for(site))
         self._clients[site] = client

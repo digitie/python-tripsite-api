@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -53,3 +54,23 @@ def test_login_without_credentials_fails_before_opening_a_browser(
 ) -> None:
     assert main(["login", "yeogiotae"]) == 1
     assert json.loads(capsys.readouterr().err)["error_type"] == "CredentialsNotConfiguredError"
+
+
+def test_wait_for_enter_returns_once_a_line_is_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tripsite_api.cli import _wait_for_enter
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+    asyncio.run(_wait_for_enter("ok? "))
+
+
+def test_wait_for_enter_surfaces_end_of_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tripsite_api.cli import _wait_for_enter
+
+    def closed(prompt: str = "") -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", closed)
+
+    with pytest.raises(EOFError):
+        asyncio.run(_wait_for_enter("ok? "))

@@ -18,7 +18,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
-from .browser import chromium_executable_available
+from .browser import chromium_launch_error
 from .config import Settings
 from .service import ReservationService, error_payload
 
@@ -110,10 +110,11 @@ def run_server() -> None:
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    if not chromium_executable_available():
+    launch_error = chromium_launch_error(headless=True)
+    if launch_error is not None:
         sys.stderr.write(
-            "Chromium is not installed for Playwright. Run `playwright install chromium` "
-            "once, then start the server again.\n"
+            "Chromium cannot be launched for Playwright "
+            f"({launch_error}). Run `playwright install chromium` once, then start the server again.\n"
         )
         raise SystemExit(1)
 
