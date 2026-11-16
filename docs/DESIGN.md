@@ -509,3 +509,36 @@ Python 공식 `mcp` SDK(FastMCP)를 사용해 stdio 기반 MCP 서버로 구현�
 - `TRIPSITE_MIN_LOGIN_INTERVAL_SEC`/`TRIPSITE_MAX_LOGIN_ATTEMPTS_PER_DAY`(5절)의 기본값이
   실제 각 사이트의 차단 임계치에 비해 적절한지는 사전에 알 수 없다 — 실측 중 차단/캡차
   징후가 보이면 기본값을 더 보수적으로 낮춘다.
+
+## 15. MCP 단계 구현 반영 (v3)
+
+구현 중 적대적 리뷰에서 나온 결정을 여기에 고정한다.
+
+- **storage_state 공유 규칙.** MCP 서버(장기 실행)와 `tripsite login`(단발 실행)이 같은
+  파일을 쓴다. 각 `BrowserSession`은 마지막으로 읽거나 쓴 시점의 파일 지문(mtime, size)을
+  기억한다. `new_page()`는 파일이 바뀌었으면 컨텍스트를 새 파일로 다시 만든다(모든 페이지
+  사용은 사이트 락 아래에서만 일어나므로 안전). `save_storage_state()`는 파일을 다른
+  프로세스가 바꿨으면 덮어쓰지 않는다. 서버 종료가 CLI가 방금 얻은 세션을 지우는 일을 막기
+  위함이다. 쓰기는 임시 파일 후 `os.replace`로 원자적으로 한다. 손상된 파일은 없는 것으로
+  취급하고 새로 시작한다.
+- **로그인 직후 저장.** `login_with_throttle()`은 로그인에 성공하면 곧바로 세션을 저장한다.
+  그래야 별도 프로세스의 `tripsite check`가 서버 종료를 기다리지 않고 새 세션을 본다.
+- **시작 실패 정리.** `BrowserSession.start()`가 중간에 실패하면 드라이버와 브라우저를 직접
+  닫는다. 실패한 세션은 레지스트리에 들어가지 않으므로 나중에 닫힐 기회가 없기 때문이다.
+- **오류 반환 규약.** MCP 도구는 `CallToolResult`를 직접 반환한다. 실패는 `isError: true`와
+  `structuredContent`(error_type, message, site)로 간다. 예외를 던지면 FastMCP가
+  "Error executing tool ..." 접두사를 붙이므로 쓰지 않는다. 처리되지 않은 예외의 메시지는
+  노출하지 않는다.
+- **limit 강제.** 명시적 `limit`도 기반 클래스에서 자른다(무제한 상한과 같은 방식). 어댑터가
+  limit을 무시해도 결과 크기는 계약을 지킨다. 캐시 키에도 `limit`을 포함한다.
+- **클라이언트 생성 경쟁.** 같은 사이트에 대한 첫 동시 호출은 클라이언트를 하나만 만든다.
+  세션 시작을 기다린 뒤 캐시를 한 번 더 확인한다.
+- **2단계 인증 대기(CLI).** `input()`은 데몬 스레드에서 읽는다. 기본 실행기를 쓰면 Ctrl-C가
+  프롬프트에서 멈춘다. 브라우저 창이 닫히거나 stdin이 닫히면 구조화된 `LoginFailedError`로
+  끝난다.
+- **Chromium 점검.** 서버 시작 시 실제로 띄워 보고 닫는다. 파일 존재만으로는 headless 셸
+  누락을 잡지 못하기 때문이다.
+- **mcp 하한.** `mcp>=1.19,<2`. 1.19는 FastMCP가 반환된 `CallToolResult`를 그대로 통과시키는
+  첫 버전이다(1.19.0 + pydantic<2.14에서 검증). 1.19는 pydantic 2.14에서 제거된 비공개 함수를
+  import하므로, 최저 버전을 최신 pydantic과 함께 설치하면 import 단계에서 실패한다(조용한
+  오동작보다 낫다).

@@ -132,3 +132,28 @@ async def test_concurrent_browsers_across_sites_do_not_deadlock(tmp_path: Path) 
         )
     finally:
         await registry.close_all()
+
+
+async def test_close_all_closes_remaining_sessions_when_one_fails(tmp_path: Path) -> None:
+    registry = SiteRegistry(_settings(tmp_path))
+    closed: list[str] = []
+
+    class _Session:
+        def __init__(self, site: str, fail: bool) -> None:
+            self.site = site
+            self.fail = fail
+
+        async def close(self) -> None:
+            if self.fail:
+                raise RuntimeError("driver already gone")
+            closed.append(self.site)
+
+    registry._sessions = {
+        "yanolja": _Session("yanolja", fail=True),
+        "naver": _Session("naver", fail=False),
+    }
+
+    await registry.close_all()
+
+    assert closed == ["naver"]
+    assert registry._sessions == {}

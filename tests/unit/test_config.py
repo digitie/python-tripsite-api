@@ -1,4 +1,5 @@
 import dataclasses
+import sys
 import threading
 from pathlib import Path
 
@@ -153,6 +154,7 @@ def test_login_throttle_is_independent_per_site(tmp_path: Path) -> None:
     LoginThrottle("naver", settings).check_and_record(now=1_000.0)  # must not raise
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits do not exist on Windows")
 def test_login_throttle_attempt_file_is_saved_with_0600_permissions(tmp_path: Path) -> None:
     LoginThrottle("yanolja", _settings(tmp_path)).check_and_record(now=1_000.0)
 
@@ -163,7 +165,7 @@ def test_login_throttle_attempt_file_is_saved_with_0600_permissions(tmp_path: Pa
 
 def test_login_throttle_survives_concurrent_attempts_without_losing_updates(tmp_path: Path) -> None:
     """Regression test for a review finding: check_and_record()'s read-modify-write
-    must be one atomic step (via the fcntl advisory lock), or concurrent callers can
+    must be one atomic step (via the cross-process file lock), or concurrent callers can
     clobber each other's counter update and the daily cap stops being enforced.
     """
     settings = _settings(tmp_path, min_login_interval_sec=0, max_login_attempts_per_day=1_000_000)

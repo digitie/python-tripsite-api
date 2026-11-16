@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Callable
 
 from .browser import BrowserSession
@@ -12,6 +13,8 @@ from .config import SUPPORTED_SITES, Settings
 
 if TYPE_CHECKING:
     from .sites.base import BaseSiteClient
+
+logger = logging.getLogger(__name__)
 
 
 class SiteRegistry:
@@ -61,8 +64,11 @@ class SiteRegistry:
             return session
 
     async def close_all(self) -> None:
-        for session in self._sessions.values():
-            await session.close()
+        for site, session in self._sessions.items():
+            try:
+                await session.close()
+            except Exception:
+                logger.warning("Failed to close browser session for site=%s", site, exc_info=True)
         self._sessions.clear()
         self._locks.clear()
 
