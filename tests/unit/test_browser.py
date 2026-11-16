@@ -6,6 +6,7 @@ crash recovery (docs/DESIGN.md section 6).
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -35,7 +36,8 @@ async def test_browser_session_persists_storage_state_across_restarts(tmp_path: 
 
     state_path = tmp_path / "storage_state_yanolja.json"
     assert state_path.exists()
-    assert oct(state_path.stat().st_mode & 0o777) == oct(0o600)
+    if sys.platform != "win32":  # POSIX permission bits do not exist on Windows
+        assert oct(state_path.stat().st_mode & 0o777) == oct(0o600)
     saved = json.loads(state_path.read_text())
     assert any(c["name"] == "tripsite_test" for c in saved.get("cookies", []))
 

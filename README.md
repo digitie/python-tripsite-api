@@ -19,6 +19,18 @@ pip install -e ".[dev]"
 playwright install chromium   # 최초 1회
 ```
 
+Windows(PowerShell):
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+playwright install chromium
+```
+
+PowerShell에서 계정 정보는 `$env:NAVER_ID = "..."`처럼 현재 창에만 설정하는 것을 권장합니다.
+`setx`는 값을 레지스트리에 평문으로 영구 저장합니다.
+
 ## 사용법
 
 계정 정보는 환경변수로 줍니다. 설정하지 않은 사이트는 조회 시 건너뜁니다.

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +14,36 @@ from pathlib import Path
 from .errors import CredentialsNotConfiguredError, LoginFailedError
 
 logger = logging.getLogger(__name__)
+
+if sys.platform == "win32":
+    import errno
+    import msvcrt
+
+    def _lock_fd(fd: int) -> None:
+        # msvcrt locks a byte range from the current position; always lock byte 0.
+        # LK_NBLCK plus a short sleep instead of LK_LOCK, which retries only once a second.
+        while True:
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EDEADLOCK):
+                    raise
+                time.sleep(0.01)
+
+    def _unlock_fd(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _lock_fd(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def _unlock_fd(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 SUPPORTED_SITES: tuple[str, ...] = ("yanolja", "yeogiotae", "naver")
 
@@ -176,16 +206,15 @@ class LoginThrottle:
         site at once).
         """
         self._settings.state_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._lock_path, "w") as lock_file:
-            try:
-                os.fchmod(lock_file.fileno(), 0o600)
-            except OSError:
-                pass
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            _lock_fd(fd)
             try:
                 yield
             finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+                _unlock_fd(fd)
+        finally:
+            os.close(fd)
 
     def check_and_record(self, *, now: float | None = None) -> None:
         """Raise LoginFailedError if a new attempt would violate the cooldown or the
